@@ -629,7 +629,103 @@ function gameOver() {
 
 /* ----------------------------------------------------------------
    7. RENDER
+
+   The look is "fake 3D": all art is still drawn on the 2D canvas, but a
+   consistent top-left light direction plus extrusion, bevels, gradients,
+   and shaded spheres make shapes read as solid objects with depth.
+   Gameplay/hitboxes are unaffected — this is purely cosmetic.
    ---------------------------------------------------------------- */
+
+// --- Color utilities (parse #rrggbb, then lighten/darken or add alpha) ---
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  return {
+    r: parseInt(h.substring(0, 2), 16),
+    g: parseInt(h.substring(2, 4), 16),
+    b: parseInt(h.substring(4, 6), 16),
+  };
+}
+// amt > 0 lightens toward white, amt < 0 darkens toward black (range -1..1)
+function shade(hex, amt) {
+  const { r, g, b } = hexToRgb(hex);
+  const mix = (c) => amt >= 0
+    ? Math.round(c + (255 - c) * amt)
+    : Math.round(c * (1 + amt));
+  return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+}
+function rgba(hex, a) {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+// 3D block text: draw dark extrusion layers stepping down-right, then the face.
+function extrudeText(text, x, y, color, size, depth, align = "center", weight = "bold") {
+  ctx.save();
+  ctx.font = `${weight} ${size}px "Courier New", monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = "middle";
+  // extruded side faces (no blur, darkened) from far to near
+  ctx.shadowBlur = 0;
+  for (let i = depth; i >= 1; i--) {
+    ctx.fillStyle = shade(color, -0.55);
+    ctx.fillText(text, x + i, y + i);
+  }
+  // glowing front face
+  ctx.shadowColor = color;
+  ctx.shadowBlur = size * 0.4;
+  ctx.fillStyle = shade(color, 0.15);
+  ctx.fillText(text, x, y);
+  // top-left specular highlight edge
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = rgba("#ffffff", 0.25);
+  ctx.fillText(text, x - 1, y - 1);
+  ctx.restore();
+}
+
+// Shaded sphere: radial gradient with a top-left highlight -> volumetric look.
+function shadeSphere(x, y, r, color) {
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+  g.addColorStop(0, shade(color, 0.7));
+  g.addColorStop(0.45, color);
+  g.addColorStop(1, shade(color, -0.6));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// Embossed HUD panel: dark rounded fill with light top edge + dark bottom edge.
+function bevelPanel(x, y, w, h, color) {
+  const r = 6;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, rgba(color, 0.22));
+  g.addColorStop(1, "rgba(0,0,0,0.45)");
+  ctx.fillStyle = g;
+  ctx.fill();
+  // top highlight
+  ctx.strokeStyle = rgba(color, 0.6);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y + 0.5);
+  ctx.lineTo(x + w - r, y + 0.5);
+  ctx.stroke();
+  // bottom shadow
+  ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  ctx.beginPath();
+  ctx.moveTo(x + r, y + h - 0.5);
+  ctx.lineTo(x + w - r, y + h - 0.5);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function glowRect(x, y, w, h, color, blur) {
   ctx.save();
   ctx.shadowColor = color;
@@ -651,23 +747,85 @@ function glowText(text, x, y, color, size, blur, align = "center", weight = "bol
   ctx.restore();
 }
 
-// Draw an envelope icon (rect + flap lines) with glow
+// Draw an envelope as an extruded 3D-looking object.
+// The lit front face stays aligned to the logical x,y,w,h so the hitbox
+// (used by collisions) is unchanged — depth is drawn behind/around it.
 function drawEnvelope(x, y, w, h, color) {
+  const d = 6; // extrusion depth toward lower-right
   ctx.save();
+
+  // soft contact shadow on the playfield (offset down-right, blurred)
+  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetX = 5;
+  ctx.shadowOffsetY = 7;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(x, y, w, h);
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  // extruded right + bottom faces (darkened, no glow) to imply thickness
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = shade(color, -0.55);
+  ctx.beginPath();
+  ctx.moveTo(x + w, y);
+  ctx.lineTo(x + w + d, y + d);
+  ctx.lineTo(x + w + d, y + h + d);
+  ctx.lineTo(x + d, y + h + d);
+  ctx.lineTo(x, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+
+  // front face: vertical gradient, lit at top -> shaded at bottom
   ctx.shadowColor = color;
   ctx.shadowBlur = 14;
-  // body
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  const fg = ctx.createLinearGradient(0, y, 0, y + h);
+  fg.addColorStop(0, shade(color, -0.15));
+  fg.addColorStop(0.5, shade(color, -0.55));
+  fg.addColorStop(1, shade(color, -0.7));
+  ctx.fillStyle = fg;
   ctx.fillRect(x, y, w, h);
+  // bright neon outline
+  ctx.shadowBlur = 10;
+  ctx.strokeStyle = shade(color, 0.2);
+  ctx.lineWidth = 2;
   ctx.strokeRect(x, y, w, h);
-  // flap (V lines)
+
+  // folded flap: two triangles with different shading (a crease catches light)
+  ctx.shadowBlur = 0;
+  const midY = y + h * 0.55;
+  ctx.beginPath(); // left half (lit)
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w / 2, midY);
+  ctx.lineTo(x + w / 2, y);
+  ctx.closePath();
+  ctx.fillStyle = rgba(color, 0.45);
+  ctx.fill();
+  ctx.beginPath(); // right half (shaded)
+  ctx.moveTo(x + w, y);
+  ctx.lineTo(x + w / 2, midY);
+  ctx.lineTo(x + w / 2, y);
+  ctx.closePath();
+  ctx.fillStyle = rgba(color, 0.2);
+  ctx.fill();
+  // flap edge lines
+  ctx.strokeStyle = shade(color, 0.3);
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(x, y);
-  ctx.lineTo(x + w / 2, y + h * 0.55);
+  ctx.lineTo(x + w / 2, midY);
   ctx.lineTo(x + w, y);
   ctx.stroke();
+
+  // top-edge specular highlight
+  ctx.strokeStyle = rgba("#ffffff", 0.35);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + 1, y + 1);
+  ctx.lineTo(x + w - 1, y + 1);
+  ctx.stroke();
+
   ctx.restore();
 }
 
@@ -676,28 +834,51 @@ function drawPlayer() {
   const x = player.x, y = player.y, w = player.w, h = player.h;
   ctx.save();
   ctx.translate(x, y);
+  // hull silhouette path (reused for fill + stroke)
+  const hull = () => {
+    ctx.beginPath();
+    ctx.moveTo(-w/2, h/2);
+    ctx.lineTo(-w/2, 0);
+    ctx.quadraticCurveTo(-w/2, -h/2, 0, -h/2);
+    ctx.quadraticCurveTo(w/2, -h/2, w/2, 0);
+    ctx.lineTo(w/2, h/2);
+    ctx.closePath();
+  };
+
+  // extruded base lip (darkened slab under the hull -> sits on a surface)
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = shade(COLORS.cyan, -0.7);
+  ctx.fillRect(-w/2, h/2 - 3, w, 6);
+
+  // hull body: vertical metallic gradient (bright top -> dark belly)
   ctx.shadowColor = COLORS.cyan;
   ctx.shadowBlur = 16;
-  ctx.strokeStyle = COLORS.cyan;
-  ctx.fillStyle = "rgba(0,40,55,0.6)";
-  ctx.lineWidth = 2.5;
-  // shield base (rounded hull)
-  ctx.beginPath();
-  ctx.moveTo(-w/2, h/2);
-  ctx.lineTo(-w/2, 0);
-  ctx.quadraticCurveTo(-w/2, -h/2, 0, -h/2);
-  ctx.quadraticCurveTo(w/2, -h/2, w/2, 0);
-  ctx.lineTo(w/2, h/2);
-  ctx.closePath();
+  const bg = ctx.createLinearGradient(0, -h/2, 0, h/2);
+  bg.addColorStop(0, shade(COLORS.cyan, 0.5));
+  bg.addColorStop(0.45, shade(COLORS.cyan, -0.4));
+  bg.addColorStop(1, shade(COLORS.cyan, -0.75));
+  ctx.fillStyle = bg;
+  hull();
   ctx.fill();
+  // neon rim
+  ctx.strokeStyle = shade(COLORS.cyan, 0.3);
+  ctx.lineWidth = 2.5;
+  hull();
   ctx.stroke();
-  // cannon barrel
-  ctx.fillStyle = COLORS.cyan;
+
+  // cannon barrel with a vertical specular streak
+  ctx.shadowBlur = 6;
+  const cg = ctx.createLinearGradient(-4, 0, 4, 0);
+  cg.addColorStop(0, shade(COLORS.cyan, -0.4));
+  cg.addColorStop(0.5, shade(COLORS.cyan, 0.7));
+  cg.addColorStop(1, shade(COLORS.cyan, -0.4));
+  ctx.fillStyle = cg;
   ctx.fillRect(-4, -h/2 - 12, 8, 14);
-  // accent core
+
+  // glossy magenta core (shaded sphere reads as a domed light)
   ctx.shadowColor = COLORS.magenta;
-  ctx.fillStyle = COLORS.magenta;
-  ctx.fillRect(-10, -2, 20, 5);
+  ctx.shadowBlur = 12;
+  shadeSphere(0, 0, 7, COLORS.magenta);
   ctx.restore();
 }
 
@@ -705,26 +886,56 @@ function drawBackground() {
   // base
   ctx.fillStyle = COLORS.bg;
   ctx.fillRect(0, 0, VW, VH);
-  // stars
+
+  // stars: size + brightness already vary, giving a parallax depth field.
+  // Bigger/brighter stars read as "closer".
   for (const s of stars) {
     ctx.save();
     ctx.globalAlpha = s.a;
     ctx.shadowColor = s.c;
-    ctx.shadowBlur = 6;
+    ctx.shadowBlur = 4 + s.size * 3;
     ctx.fillStyle = s.c;
     ctx.fillRect(s.x, s.y, s.size, s.size);
     ctx.restore();
   }
-  // bottom "defense line"
+
+  // Perspective floor grid: lines converge to a vanishing point on the
+  // horizon, creating a sense of a 3D ground plane receding into the screen.
+  const t = performance.now() / 1000;
+  const horizon = VH * 0.5;          // where the floor "starts"
+  const vpX = VW / 2;                // vanishing point x
   ctx.save();
-  ctx.strokeStyle = "rgba(0,240,255,0.25)";
+  ctx.strokeStyle = "rgba(0,240,255,0.10)";
+  ctx.lineWidth = 1;
+  // converging vertical rails
+  for (let i = -6; i <= 6; i++) {
+    const baseX = vpX + i * (VW / 6);
+    ctx.beginPath();
+    ctx.moveTo(vpX, horizon);
+    ctx.lineTo(baseX, VH);
+    ctx.stroke();
+  }
+  // horizontal rungs spaced by perspective, scrolling toward the viewer
+  ctx.strokeStyle = "rgba(255,47,208,0.08)";
+  for (let i = 0; i < 14; i++) {
+    // exponential spacing + slow scroll for motion
+    const f = ((i + (t * 0.4) % 1) / 14);
+    const yy = horizon + (VH - horizon) * (f * f);
+    ctx.beginPath();
+    ctx.moveTo(0, yy);
+    ctx.lineTo(VW, yy);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // bottom "defense line" -> a glowing 3D rail (bright core + soft glow band)
+  ctx.save();
   ctx.shadowColor = COLORS.cyan;
-  ctx.shadowBlur = 10;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, VH - 30);
-  ctx.lineTo(VW, VH - 30);
-  ctx.stroke();
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = rgba(COLORS.cyan, 0.5);
+  ctx.fillRect(0, VH - 31, VW, 3);
+  ctx.fillStyle = rgba(COLORS.cyan, 0.12);
+  ctx.fillRect(0, VH - 28, VW, 6);
   ctx.restore();
 }
 
@@ -735,20 +946,25 @@ function drawParticles() {
     ctx.globalAlpha = a;
     ctx.shadowColor = p.color;
     ctx.shadowBlur = 10;
-    ctx.fillStyle = p.color;
-    ctx.fillRect(p.x, p.y, p.size, p.size);
+    // shaded sphere instead of a flat square -> bursts look volumetric
+    shadeSphere(p.x, p.y, p.size + 1, p.color);
     ctx.restore();
   }
 }
 
 function drawHUD() {
-  // Score (left)
-  glowText("SCORE", 18, 24, COLORS.cyan, 14, 8, "left");
-  glowText(String(state.score).padStart(6, "0"), 18, 46, COLORS.white, 24, 10, "left");
+  // Embossed HUD panels behind each readout for a paneled cockpit feel
+  bevelPanel(10, 10, 140, 50, COLORS.cyan);
+  bevelPanel(VW/2 - 80, 10, 160, 50, COLORS.magenta);
+  bevelPanel(VW - 150, 10, 140, 50, COLORS.lime);
+
+  // Score (left) — extruded numerals
+  glowText("SCORE", 22, 24, COLORS.cyan, 14, 8, "left");
+  extrudeText(String(state.score).padStart(6, "0"), 22, 47, COLORS.white, 24, 3, "left");
 
   // High score (center)
   glowText("HIGH", VW/2, 24, COLORS.magenta, 14, 8, "center");
-  glowText(String(state.high).padStart(6, "0"), VW/2, 46, COLORS.magenta, 22, 10, "center");
+  extrudeText(String(state.high).padStart(6, "0"), VW/2, 47, COLORS.magenta, 22, 3, "center");
 
   // Combo (right area, under high)
   const mult = comboMultiplier();
@@ -774,13 +990,25 @@ function drawMiniLife(cx, cy) {
   ctx.translate(cx, cy);
   ctx.shadowColor = COLORS.lime;
   ctx.shadowBlur = 8;
-  ctx.fillStyle = COLORS.lime;
+  // gradient gives the little ship a lit-top / dark-bottom 3D facet
+  const g = ctx.createLinearGradient(0, -7, 0, 6);
+  g.addColorStop(0, shade(COLORS.lime, 0.5));
+  g.addColorStop(1, shade(COLORS.lime, -0.55));
+  ctx.fillStyle = g;
   ctx.beginPath();
   ctx.moveTo(-9, 6);
   ctx.lineTo(0, -7);
   ctx.lineTo(9, 6);
   ctx.closePath();
   ctx.fill();
+  // top-edge highlight
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = rgba("#ffffff", 0.4);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-9, 6);
+  ctx.lineTo(0, -7);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -807,8 +1035,8 @@ function drawTitle() {
   // big title
   const t = performance.now() / 1000;
   const bob = Math.sin(t * 1.4) * 6;
-  glowText("PHISH", VW/2, 180 + bob, COLORS.red, 84, 30, "center");
-  glowText("INVADERS", VW/2, 268 + bob, COLORS.cyan, 70, 30, "center");
+  extrudeText("PHISH", VW/2, 180 + bob, COLORS.red, 84, 7, "center");
+  extrudeText("INVADERS", VW/2, 268 + bob, COLORS.cyan, 70, 6, "center");
 
   // decorative envelopes
   drawEnvelope(VW/2 - 150, 330, 40, 30, COLORS.red);
@@ -845,7 +1073,7 @@ function drawGameOver() {
   ctx.restore();
 
   const t = performance.now() / 1000;
-  glowText("GAME OVER", VW/2, 200, COLORS.red, 64, 28, "center");
+  extrudeText("GAME OVER", VW/2, 200, COLORS.red, 64, 6, "center");
 
   if (state.newHigh) {
     if (Math.floor(t * 3) % 2 === 0) {
@@ -854,7 +1082,7 @@ function drawGameOver() {
   }
 
   glowText("FINAL SCORE", VW/2, 350, COLORS.cyan, 22, 12, "center");
-  glowText(String(state.score).padStart(6, "0"), VW/2, 390, COLORS.white, 44, 16, "center");
+  extrudeText(String(state.score).padStart(6, "0"), VW/2, 392, COLORS.white, 44, 5, "center");
 
   glowText("HIGH SCORE  " + String(state.high).padStart(6, "0"),
            VW/2, 450, COLORS.magenta, 20, 12, "center");
